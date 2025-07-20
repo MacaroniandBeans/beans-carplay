@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+   <meta charset="UTF-8">
+   <title>Car Radio</title>
+   <link rel="stylesheet" href="style.css">
+   <script src="https://www.youtube.com/iframe_api"></script>
+   <style>
+       html, body {
+           overflow: hidden;
+           height: 100%;
+           margin: 0;
+           padding: 0;
+       }
+       .station-name {
+           font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+           font-size: 1.2em;
+           text-align: center;
+           margin-top: 10px;
+           color: #ffffff;
+       }
+       .queue-list {
+           width: 100%;
+           max-height: 100px;
+           overflow-y: auto;
+           margin-top: 10px;
+           background-color: #111;
+           border-radius: 10px;
+           padding: 5px 10px;
+           color: #ccc;
+           font-size: 0.9em;
+       }
+       .queue-list div {
+           padding: 4px 0;
+           cursor: pointer;
+       }
+       .queue-list div.selected {
+           background-color: #333;
+           color: #fff;
+       }
+   </style>
+</head>
+<body>
+   <div class="music-player" id="musicUI">
+       <button class="close-btn" onclick="closeUI()">×</button>
+       <div class="image-holder">
+           <img id="art" src="https://r2.fivemanage.com/zGWdIDHGMLMnFERa9RrEA/prp.png" alt="Album Art">
+           <div class="station-name">Phoenix Radio</div>
+       </div>
+       <div class="controls">
+           <label>Audio URL:</label>
+           <input type="text" id="urlInput" placeholder="https://example.com/music.mp3">
+
+           <label>Volume:</label>
+           <input type="range" id="volumeSlider" min="1" max="100" step="1" value="50">
+           <span id="volumeLabel">50</span>
+
+           <div class="buttons">
+               <button onclick="prevSong()">Previous</button>
+               <button onclick="playMusic()">Play</button>
+               <button onclick="nextSong()">Next</button>
+               <button onclick="stopMusic()">Stop</button>
+               <button onclick="playSelectedSong()">Play Selected</button>
+           </div>
+           <div class="queue-list" id="queueList"></div>
+       </div>
+       <div id="ytPlayer" style="display:none;"></div>
+   </div>
+
+   <script>
+       const musicPlayer = document.getElementById('musicUI');
+       const ytPlayerDiv = document.getElementById('ytPlayer');
+       const audioPlayer = new Audio();
+       let ytPlayer;
+       let ytPlayerReady = false;
+       const volumeSlider = document.getElementById('volumeSlider');
+       const volumeLabel = document.getElementById('volumeLabel');
+       const queueList = document.getElementById('queueList');
+       window.currentVolume = 0.5;
+
+       let songQueue = [];
+       let currentSongIndex = -1;
+       let selectedSongIndex = -1;
+       let isPlaying = false;
+
+       function updateQueueDisplay() {
+           queueList.innerHTML = '';
+           songQueue.forEach((song, index) => {
+               const entry = document.createElement('div');
+               entry.textContent = `${index === currentSongIndex ? '▶ ' : ''}${song.title || song.url}`;
+               if (index === selectedSongIndex) {
+                   entry.classList.add('selected');
+               }
+               entry.onclick = () => {
+                   selectedSongIndex = index;
+                   updateQueueDisplay();
+               };
+               queueList.appendChild(entry);
+           });
+       }
+
+       function sendSongToLua(url, volume) {
+           fetch(`https://${GetParentResourceName()}/sendMusicData`, {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' },
+               body: JSON.stringify({ url, radius: 15, volume })
+           });
+       }
+
+       function playCurrentSong() {
+           if (songQueue[currentSongIndex]) {
+               const { url, volume } = songQueue[currentSongIndex];
+               isPlaying = true;
+               sendSongToLua(url, volume);
+               updateQueueDisplay();
+           }
+       }
+
+       function playSelectedSong() {
+           if (selectedSongIndex >= 0 && selectedSongIndex < songQueue.length) {
+               currentSongIndex = selectedSongIndex;
+               playCurrentSong();
+           }
+       }
+
+       function playMusic() {
+           const url = document.getElementById('urlInput').value;
+           let volume = parseInt(volumeSlider.value);
+
+           if (isNaN(volume) || volume > 100) volume = 100;
+           if (volume < 1) volume = 1;
+
+           const scaledVolume = volume / 100;
+           window.currentVolume = scaledVolume;
+
+           fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`)
+           .then(res => res.json())
+           .then(data => {
+               songQueue.push({ url, volume: scaledVolume, title: data.title });
+               updateQueueDisplay();
+           })
+           .catch(() => {
+               songQueue.push({ url, volume: scaledVolume, title: url }); // fallback
+               updateQueueDisplay();
+           });
+
+
+
+           if (!isPlaying) {
+               currentSongIndex = songQueue.length - 1;
+               playCurrentSong();
+           }
+       }
+
+       function nextSong() {
+           if (currentSongIndex < songQueue.length - 1) {
+               currentSongIndex++;
+               playCurrentSong();
+           }
+       }
+
+       function prevSong() {
+           if (currentSongIndex > 0) {
+               currentSongIndex--;
+               playCurrentSong();
+           }
+       }
+
+       volumeSlider.addEventListener('input', () => {
+           const raw = parseInt(volumeSlider.value);
+           volumeLabel.innerText = raw;
+           window.currentVolume = raw / 100;
+
+           if (ytPlayerReady && ytPlayer?.setVolume) {
+               ytPlayer.setVolume(window.currentVolume * 100);
+           }
+           if (audioPlayer) {
+               audioPlayer.volume = window.currentVolume;
+           }
+       });
+
+       window.addEventListener('message', (event) => {
+           const data = event.data;
+
+           if (data.action === 'play') {
+               if (isYouTubeURL(data.url)) {
+                   const videoId = extractYouTubeID(data.url);
+                   playYouTube(videoId, data.volume ?? 0.5);
+               } else {
+                   stopYouTube();
+                   playAudio(data.url, data.volume ?? 0.5);
+               }
+           } else if (data.action === 'setVolume') {
+               if (ytPlayerReady && ytPlayer?.setVolume) {
+                   ytPlayer.setVolume(data.volume * 100);
+               }
+               if (audioPlayer) {
+                   audioPlayer.volume = data.volume;
+               }
+            } else if (data.action === 'stop') {
+                stopYouTube();
+                stopAudio();
+                isPlaying = false;
+                        
+                if (currentSongIndex < songQueue.length - 1) {
+                    setTimeout(() => {
+                        currentSongIndex++;
+                        playCurrentSong();
+                        updateQueueDisplay();
+                    }, 250);
+                }
+         } else if (data.action === 'toggleUI') {
+               if (data.show) {
+                   musicPlayer.classList.add('active');
+               } else {
+                   closeUI();
+               }
+           } else if (data.action === 'getCurrentVolumeRequest') {
+               fetch(`https://${GetParentResourceName()}/getVolume`, {
+                   method: 'POST',
+                   headers: { 'Content-Type': 'application/json' },
+                   body: JSON.stringify({ volume: window.currentVolume })
+               });
+           }
+       });
+
+       window.addEventListener('keydown', (e) => {
+           if (e.key === 'Escape') {
+               closeUI();
+           }
+       });
+
+       function onYouTubeIframeAPIReady() {
+           ytPlayer = new YT.Player('ytPlayer', {
+               height: '0',
+               width: '0',
+               videoId: '',
+               playerVars: { autoplay: 1 },
+               events: {
+                   onReady: () => {
+                       ytPlayerReady = true;
+                   },
+                   onError: (e) => console.error('YouTube error:', e)
+               }
+           });
+       }
+
+       function playYouTube(videoId, volume) {
+           if (ytPlayerReady && ytPlayer && ytPlayer.loadVideoById) {
+               ytPlayer.loadVideoById(videoId);
+               ytPlayer.setVolume(volume * 100);
+           } else {
+               setTimeout(() => playYouTube(videoId, volume), 500);
+           }
+       }
+       function playNextInQueue() {
+    if (currentSongIndex < songQueue.length - 1) {
+        currentSongIndex++;
+        const next = songQueue[currentSongIndex];
+        isPlaying = true;
+        sendSongToLua(next.url, next.volume);
+        updateQueueDisplay();
+    } else {
+        isPlaying = false;
+    }
+}
+
+
+       function stopYouTube() {
+           if (ytPlayer && ytPlayer.stopVideo) {
+               ytPlayer.stopVideo();
+           }
+       }
+
+       function playAudio(url, volume) {
+           audioPlayer.src = url;
+           audioPlayer.volume = volume;
+           audioPlayer.play().catch(console.error);
+       }
+
+       function stopAudio() {
+           audioPlayer.pause();
+           audioPlayer.src = '';
+       }
+
+       function isYouTubeURL(url) {
+           return url.includes("youtube.com") || url.includes("youtu.be");
+       }
+
+       function extractYouTubeID(url) {
+           const match = url.match(/(?:youtube\.com.*v=|youtu\.be\/)([^&\n?#]+)/);
+           return match && match[1] ? match[1] : null;
+       }
+
+       function stopMusic() {
+           fetch(`https://${GetParentResourceName()}/stopMusic`, {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' }
+           });
+       }
+
+       function closeUI() {
+           musicPlayer.classList.remove('active');
+           fetch(`https://${GetParentResourceName()}/closeUI`, {
+               method: 'POST',
+               headers: { 'Content-Type': 'application/json' }
+           });
+       }
+   </script>
+</body>
+</html>
